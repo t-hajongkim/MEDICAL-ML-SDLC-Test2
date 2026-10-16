@@ -457,11 +457,57 @@ class ReviewApiTests(_ApiCase):
         self.assertEqual(self.api.refs[BRANCH], HEAD)
         self.refresh.assert_not_called()
 
-    def test_ordinary_text_no_audit_or_execution(self):
+    def test_natural_feedback_is_queued_without_executing_or_changing_selection(self):
         self.api.comments = [comment(1, "실행해 주세요: Python 또는 SQL 명령")]
-        self.assertEqual(self.review()["status"], "not_applicable")
-        self.assertEqual(self.api.writes, [])
+        self.assertEqual(self.review()["status"], "feedback_queued")
+        ledger = self.api.json(BRANCH, PREFIX + "feedback-requests.json")
+        self.assertEqual(ledger["comments"][0]["comment_id"], 1)
+        self.assertNotIn("body", ledger["comments"][0])
+        self.assertIsNone(self.api.json(BRANCH, PREFIX + "selection.json")["evaluation"]["primary_metric"])
         self.refresh.assert_not_called()
+
+    def test_natural_feedback_backlog_permissions_duplicates_and_pending_edit(self):
+        self.api.comments = [
+            comment(1, "외부 요청", "reader"),
+            comment(2, "AI 응답", "agent", "Bot"),
+            comment(3, "F1을 추가해 주세요."),
+            comment(4, "AP를 주지표로 설정해 주세요.", "other")]
+        result = self.review()
+        self.assertEqual(result["pending_comment_ids"], [3, 4])
+        before = len(self.api.writes)
+        self.assertEqual(self.review()["pending_comment_ids"], [3, 4])
+        self.assertEqual(len(self.api.writes), before)
+        old = self.api.json(BRANCH, PREFIX + "feedback-requests.json")["comments"][1]["body_sha256"]
+        self.api.comments[-1]["body"] = "AP와 threshold 0.3을 적용해 주세요."
+        self.review()
+        latest = self.api.json(BRANCH, PREFIX + "feedback-requests.json")["comments"][1]
+        self.assertEqual(latest["superseded_hash"], old)
+        self.assertNotEqual(latest["body_sha256"], old)
+
+    def test_natural_bot_and_read_only_comments_do_not_dispatch(self):
+        for login, kind in (("reader", "User"), ("agent", "Bot"), ("external", "User")):
+            with self.subTest(login=login):
+                self.api.comments = [comment(1, "F1을 추가해 주세요.", login, kind)]
+                self.assertEqual(self.review()["status"], "deferred")
+                self.assertEqual(self.api.writes, [])
+        self.dispatch.assert_not_called()
+
+    def test_already_applied_natural_feedback_edit_is_not_reapplied(self):
+        self.api.comments = [comment(1, "AP를 주지표로 해 주세요.")]
+        self.review()
+        ledger = self.api.content(BRANCH, PREFIX + "feedback-requests.json")
+        selection = self.api.content(BRANCH, PREFIX + "selection.json")
+        self.api.set_files(self.api.refs[BRANCH], {
+            PREFIX + "request.json": encoded(request_marker()),
+            PREFIX + "selection.json": selection,
+            PREFIX + "feedback-requests.json": ledger,
+            PREFIX + "feedback-applied.json": encoded({
+                "schema_version": 1, "repository": REPO, "pull_request": PR,
+                "comment_ids": [1], "coordination_hash": "f" * 64})})
+        before = len(self.api.writes)
+        self.api.comments[0]["body"] = "threshold를 0.9로 바꿔 주세요."
+        self.assertEqual(self.review()["status"], "unchanged")
+        self.assertEqual(len(self.api.writes), before)
 
     def test_ordinary_comments_on_unrelated_pr_are_not_failed_research_jobs(self):
         self.api.pull["head"]["ref"] = "feature/ordinary-code"
@@ -715,11 +761,14 @@ class IsolationAndWorkflowTests(unittest.TestCase):
                       workflow["concurrency"]["group"])
         job = workflow["jobs"]["review-plan"]
         self.assertEqual(job["permissions"],
-                         {"contents": "write", "pull-requests": "write", "issues": "read", "actions": "write"})
+                         {"contents": "write", "pull-requests": "write", "issues": "read"})
         checkout = job["steps"][0]
         self.assertEqual(checkout["with"]["ref"], "${{ github.event.repository.default_branch }}")
         self.assertFalse(checkout["with"]["persist-credentials"])
-        self.assertEqual(job["steps"][-1]["env"]["GH_TOKEN"], "${{ github.token }}")
+        execution = next(step for step in job["steps"] if step.get("run") == "python -B -m app.review")
+        self.assertEqual(execution["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertEqual(job["steps"][-1]["with"]["if-no-files-found"], "error")
+        self.assertIn("research-ai-target", job["steps"][-1]["with"]["name"])
         for step in job["steps"]:
             if "run" in step:
                 self.assertNotIn("${{ github.event.comment", step["run"])

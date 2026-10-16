@@ -51,6 +51,10 @@ def context_and_source(overlap=False):
               "expected_patient_overlap": {"train_validation": int(overlap), "train_test": 0, "validation_test": 0},
               "expected_test_race_missing": 0, "target_mapping": context["target_mapping"]}
     context["data_manifest"] = {"data_id": "f" * 64, "prepared_source": source}
+    context["_input_schema_request"] = {
+        "schema_version": 1, "profile_id": "synthetic_context", "data_id": "f" * 64,
+        "context_hash": "c" * 64, "known_mapping": True, "columns": [],
+    }
     return context, source
 
 
@@ -310,6 +314,16 @@ class AssetAndReportTests(unittest.TestCase):
         self.assertNotIn("decision_curve", plan["selected_ids"])
         self.assertTrue(all(entry["reason"] and entry["requires"] for entry in plan["items"]))
 
+    def test_generated_report_describes_natural_feedback_and_legacy_commands(self):
+        context, _ = context_and_source()
+        plans = planning.build_plans(report(context), context["data_manifest"],
+                                     planning.default_selection(), None)
+        text = "\n".join(research.plan_report_lines(plans))
+        self.assertIn("자연어 피드백", text)
+        self.assertIn("Python 검증", text)
+        self.assertIn("기존 `/plan`도 지원", text)
+        self.assertNotIn("일반 댓글·인용·코드블록은 선택을 바꾸지 않습니다", text)
+
     def test_gh_failure_is_explicit_and_sensitive_output_not_echoed(self):
         result = subprocess.CompletedProcess(["gh"], 1, stdout="sensitive body", stderr="secret-token")
         with patch("subprocess.run", return_value=result):
@@ -323,6 +337,27 @@ class AssetAndReportTests(unittest.TestCase):
         with patch("subprocess.run", return_value=result):
             with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
                 research.gh_json("synthetic")
+
+    def test_pr_creation_failure_names_copy_setting_without_sensitive_output(self):
+        result = subprocess.CompletedProcess(["gh"], 1, stdout="private-body", stderr="secret-token")
+        with patch("subprocess.run", return_value=result):
+            with self.assertRaises(RuntimeError) as failure:
+                research.command(["gh", "pr", "create", "--title", "private-title"])
+        message = str(failure.exception)
+        self.assertIn("draft PR 생성 실패", message)
+        self.assertIn("Allow GitHub Actions to create and approve pull requests", message)
+        self.assertIn("상속되지", message)
+        for private in ("private-body", "secret-token", "private-title"):
+            self.assertNotIn(private, message)
+
+    def test_recommendation_dispatch_failure_is_distinct_from_pr_creation(self):
+        result = subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="secret-token")
+        with patch("subprocess.run", return_value=result):
+            with self.assertRaises(RuntimeError) as failure:
+                research.command(["gh", "workflow", "run", "recommend-blocks.lock.yml"])
+        self.assertIn("Copilot 추천 워크플로 요청 실패", str(failure.exception))
+        self.assertIn("actions: write", str(failure.exception))
+        self.assertNotIn("secret-token", str(failure.exception))
 
 
 class PayloadAndPublicationTests(unittest.TestCase):
@@ -500,11 +535,14 @@ class PayloadAndPublicationTests(unittest.TestCase):
                 patch("app.research.image_assets") as assets, \
                 patch("app.research.load_context", return_value=self.context), \
                 patch("app.research.publish_payload", return_value={"status": "created"}) as publish, \
+                patch("app.research.report", side_effect=AssertionError("EDA before AI coordination")), \
                 patch.dict(os.environ, {"GITHUB_RUN_ID": "38722808263"}):
             result = research.run_workflow(opened_event(), "issues", REPOSITORY, "synthetic-collaborator", "main", work)
         self.assertEqual(result["status"], "created")
         assets.assert_called_once_with(DATA_IMAGE, work / "assets")
-        self.assertEqual(publish.call_args.args[2]["assessment_status"], "failed")
+        self.assertIsNone(publish.call_args.args[2])
+        self.assertEqual(publish.call_args.kwargs["input_phase"], "coordination")
+        self.assertEqual(publish.call_args.kwargs["input_request"], self.context["_input_schema_request"])
         self.assertTrue(publish.call_args.args[3]["workflow_run_url"].endswith("/38722808263"))
         self.assertFalse(work.exists())
 
@@ -512,13 +550,12 @@ class PayloadAndPublicationTests(unittest.TestCase):
         (self.root / "config").mkdir()
         write_json(self.root / "config" / "assets.json", {"schema_version": 1, "data_image": DATA_IMAGE})
         work = self.folder / "runtime"
-        self.context["feature_rows"][0]["feature_values"].pop()
         with patch("app.research.ROOT", self.root), \
                 patch("app.research.intake", return_value=(self.request, None)), \
                 patch("app.research.existing_pull", return_value=(None, None)), \
                 patch("app.research.command", side_effect=self.fake_command), \
                 patch("app.research.image_assets"), \
-                patch("app.research.load_context", return_value=self.context), \
+                patch("app.research.load_context", side_effect=ValueError("damaged input package")), \
                 patch("app.research.publish_payload") as publish, \
                 patch.dict(os.environ, {"GITHUB_RUN_ID": "12"}):
             with self.assertRaisesRegex(ValueError, "damaged"):
@@ -701,20 +738,19 @@ class PayloadAndPublicationTests(unittest.TestCase):
                                               "pull_url": f"https://github.com/{REPOSITORY}/pull/19"},
                                              REPOSITORY, "main")
             self.assertEqual(result["status"], "requested")
-            self.assertIn("recommend-blocks.lock.yml", execute.call_args.args[0])
-            self.assertIn("pull_request=19", execute.call_args.args[0])
-            self.assertIn("main", execute.call_args.args[0])
+            self.assertEqual(result["workflow"], "recommend-blocks.lock.yml")
+            self.assertEqual(result["pull_request"], 19)
+            self.assertEqual(result["default_branch"], "main")
+            self.assertEqual(result["trigger"], "workflow_run")
+            execute.assert_not_called()
 
-    def test_ai_dispatch_failure_is_explicit(self):
-        summary = self.folder / "dispatch-summary.json"
-        with patch("app.research.command", side_effect=RuntimeError("gh dispatch failed")), \
-                patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
-            with self.assertRaisesRegex(RuntimeError, "dispatch failed"):
+    def test_ai_handoff_rejects_other_repositories(self):
+        with patch("app.research.command") as execute:
+            with self.assertRaisesRegex(ValueError, "current repository"):
                 research.dispatch_ai({"status": "created", "ai_status": "pending",
-                                      "pull_url": f"https://github.com/{REPOSITORY}/pull/19"},
+                                      "pull_url": "https://github.com/another/repository/pull/19"},
                                      REPOSITORY, "main")
-        self.assertIn('"status": "failed"', summary.read_text(encoding="utf-8"))
-        self.assertIn('"ai_dispatch"', summary.read_text(encoding="utf-8"))
+        execute.assert_not_called()
 
     def test_provided_ai_does_not_dispatch_again(self):
         with patch("app.research.command") as execute:
@@ -726,8 +762,10 @@ class PayloadAndPublicationTests(unittest.TestCase):
         module = types.ModuleType("app.cloud_recommendations")
         module.prepare_ai = unittest.mock.Mock(return_value={"status": "prepared_mock"})
         module.apply_ai = unittest.mock.Mock(return_value={"status": "applied_mock"})
+        module.apply_input_mapping = unittest.mock.Mock(return_value={"status": "mapping_mock"})
         import app
-        for mode, handler in (("prepare-ai", module.prepare_ai), ("apply-ai", module.apply_ai)):
+        for mode, handler in (("prepare-ai", module.prepare_ai), ("apply-ai", module.apply_ai),
+                              ("apply-input-mapping", module.apply_input_mapping)):
             with patch.dict(sys.modules, {"app.cloud_recommendations": module}), \
                     patch.object(app, "cloud_recommendations", module, create=True), \
                     patch.object(sys, "argv", ["research", mode, "--pull-request", "19", "--work", str(self.folder)]), \

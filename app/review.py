@@ -17,7 +17,7 @@ import uuid
 from urllib.parse import quote
 
 from app import planning, research
-from app.asset_contract import validate_image_reference
+from app.asset_contract import canonical_hash, validate_image_reference
 
 
 EDIT_POLICY = "처리한 댓글의 편집은 다시 적용하지 않습니다. 변경하려면 새 /plan 댓글을 작성하세요."
@@ -315,6 +315,62 @@ def _refresh(repository, default, actor, issue):
         shutil.rmtree(directory)
 
 
+def _queue_natural_feedback(repository, number, identifier, actor, default, target):
+    raw = research.gh_json(f"repos/{repository}/pulls/{number}")
+    if not re.fullmatch(r"research/review-issue-[1-9][0-9]*",
+                        raw.get("head", {}).get("ref", "")):
+        return {"status": "not_applicable", "reason": "연구검토 PR의 자연어 피드백만 처리합니다."}
+    if not _human_permission(repository, target.get("user", {})):
+        return {"status": "deferred", "reason": "자연어 피드백에는 사람의 write/maintain/admin 권한이 필요합니다."}
+    pull, issue = _pull(repository, number, default)
+    tree = _tree(repository, pull["head"]["sha"])
+    directory = f"research/reports/issue-{issue}/"
+    _marker(_object(_file(repository, tree, directory + "request.json")), repository, issue)
+    previous = _file(repository, tree, directory + "feedback-requests.json", optional=True)
+    ledger = _object(previous) if previous else {
+        "schema_version": 1, "kind": "pr1-natural-feedback",
+        "repository": repository, "pull_request": number, "issue_number": issue, "comments": []}
+    applied_data = _file(repository, tree, directory + "feedback-applied.json", optional=True)
+    from app.pr1_intent import validate_feedback_state
+    references, applied_ids = validate_feedback_state(
+        ledger, _object(applied_data) if applied_data is not None else None,
+        repository, number, issue)
+    applied = set(applied_ids)
+    records = {item["comment_id"]: item for item in references}
+    comments = _comments(repository, number, identifier)
+    if identifier not in {item["id"] for item in comments}:
+        raise ValueError("이벤트 댓글이 현재 PR 댓글 목록에 없습니다.")
+    for listed in comments:
+        if listed["id"] in applied:
+            continue
+        comment = target if listed["id"] == identifier else _comment(repository, listed["id"], number)
+        body = comment.get("body")
+        if (not isinstance(body, str) or not body.strip() or plan_lines(body)
+                or not _human_permission(repository, comment.get("user", {}))):
+            continue
+        record = {"comment_id": comment["id"], "actor": comment["user"]["login"],
+                  "body_sha256": _hash(body.encode("utf-8"))}
+        old = records.get(comment["id"])
+        if old is not None and old["body_sha256"] != record["body_sha256"]:
+            record["superseded_hash"] = old["body_sha256"]
+        records[comment["id"]] = record
+    ledger["comments"] = [records[key] for key in sorted(records)]
+    content = _json(ledger).encode("utf-8")
+    if content != previous:
+        _commit_files(repository, pull["head"]["ref"], pull["head"]["sha"],
+                      {directory + "feedback-requests.json": content},
+                      f"Queue public research feedback for Issue #{issue}")
+    pending = [item["comment_id"] for item in ledger["comments"] if item["comment_id"] not in applied]
+    if not pending:
+        return {"status": "unchanged", "reason": "이미 반영된 댓글이며 편집은 재적용하지 않습니다."}
+    return {"status": "feedback_queued", "pending_comment_ids": pending,
+            "selection_changed": False, "review_pr_preserved": True,
+            "recommendation": research.dispatch_ai(
+                {"status": "updated", "ai_status": "stale",
+                 "pull_url": f"https://github.com/{repository}/pull/{number}"},
+                repository, default)}
+
+
 def review_comments(event, repository, actor, default):
     if event.get("action") != "created" or "pull_request" not in event.get("issue", {}):
         return {"status": "not_applicable"}
@@ -324,8 +380,7 @@ def review_comments(event, repository, actor, default):
     if target.get("user", {}).get("login") != actor or event["comment"].get("user", {}).get("login") != actor:
         raise ValueError("댓글 작성자와 이벤트 actor가 일치하지 않습니다.")
     if not plan_lines(target.get("body")):
-        return {"status": "not_applicable",
-                "reason": "명령만 있는 댓글을 처리합니다. 자유서술·인용·코드블록은 실행하지 않습니다."}
+        return _queue_natural_feedback(repository, number, identifier, actor, default, target)
     if not _human_permission(repository, target.get("user", {})):
         return {"status": "deferred", "reason": "사람의 write/maintain/admin 권한이 필요합니다."}
     pull, issue = _pull(repository, number, default)
@@ -427,13 +482,76 @@ def _snapshot(repository, pull, issue, files):
             or not re.fullmatch(r"[0-9a-f]{64}", eda.get("data_id") or "")):
         raise ValueError("모델 실행 없는 집계 EDA 계약이 필요합니다.")
     source = _object(files["config/prepared-source.json"])
+    input_binding = None
+    if "input-mapping.json" in files:
+        from app.input_contracts import load_profile, validate_saved_binding
+        input_binding = _object(files["input-mapping.json"])
+        registry = _object(files["config/input-profiles.json"])
+        profile = load_profile(input_binding.get("profile_id"), registry=registry)
+        schema_request = (_object(files["input-schema.json"]) if "input-schema.json" in files
+                          else input_binding.get("schema_request"))
+        input_binding = validate_saved_binding(input_binding, profile, schema_request)
+        if profile["source_kind"] == "registered_prepared_v1":
+            original = input_binding["source_manifest"]
+            source = {
+                "source_profile": profile["profile_id"], "target": "target",
+                "features": original["feature_columns"],
+                "splits": {name: {"rows": count} for name, count in original["split_rows"].items()},
+                "target_mapping": profile["target_values"], "limitations": profile["limitations"],
+                "probability_output_planned": profile.get("probability_output_planned") is True,
+            }
+        expected_mapping_hash = canonical_hash({
+            name: input_binding[name] for name in
+            ("profile_id", "data_id", "bindings", "split_values", "target_values", "profile_snapshot")
+        })
+        if eda.get("data_id") != input_binding["data_id"] or eda.get("input_mapping_hash") != expected_mapping_hash:
+            raise ValueError("병합된 EDA와 검증한 입력 매핑의 data_id/hash가 다릅니다.")
     research.validate_aggregate(eda, source)
     catalogs = {"eda": _object(files["config/eda-catalog.json"]),
                 "evaluation": _object(files["config/metric-catalog.json"])}
     policy = _object(files["config/planning-policy.json"])
+    from app.pr1_intent import validate_feedback_state
+    feedback, applied_ids = validate_feedback_state(
+        _object(files["feedback-requests.json"]) if "feedback-requests.json" in files else None,
+        _object(files["feedback-applied.json"]) if "feedback-applied.json" in files else None,
+        repository, pull["number"], issue)
+    if set(item["comment_id"] for item in feedback) - set(applied_ids):
+        raise ValueError("미반영 자연어 피드백이 남아 있어 승인 계획을 고정할 수 없습니다.")
+    coordination = None
+    if eda.get("coordination_hash") is not None:
+        if "coordination-plan.json" not in files:
+            raise ValueError("AI 조율 hash에 대응하는 승인 전 조율 기록이 없습니다.")
+        coordination = _object(files["coordination-plan.json"])
+        required = {"record", "code_commit", "schema", "eda_evidence", "coordination_hash"}
+        if (set(coordination) != required or coordination["code_commit"] != code
+                or coordination["coordination_hash"] != canonical_hash({
+                    key: value for key, value in coordination.items() if key != "coordination_hash"})
+                or coordination["coordination_hash"] != eda["coordination_hash"]
+                or coordination["eda_evidence"] != eda.get("coordination_evidence")):
+            raise ValueError("AI 조율 기록·실행 코드·EDA 근거 hash가 일치하지 않습니다.")
+        from app.pr1_intent import validate_record
+        validate_record(coordination["record"], selection, request, coordination["schema"],
+                        catalogs=catalogs, policy=policy)
+        if ("feedback-applied.json" not in files
+                or _object(files["feedback-applied.json"])["coordination_hash"] != coordination["coordination_hash"]
+                or not set(coordination["record"]["feedback_ids"]).issubset(applied_ids)):
+            raise ValueError("AI 조율과 피드백 반영 기록이 일치하지 않습니다.")
+        if (coordination["record"]["request_hash"] != eda.get("research_request_hash")
+                or coordination["schema"].get("data_id") != eda["data_id"]
+                or coordination["schema"].get("feature_columns") != source["features"]
+                or coordination["schema"].get("model_ref") != model_reference):
+            raise ValueError("AI가 읽은 목적·특성·모델과 병합된 계획이 다릅니다.")
+        if input_binding is not None:
+            bound_schema = input_binding["schema_request"]
+            if (set(coordination["schema"]) != set(bound_schema) | {
+                    "feature_columns", "model_ref", "current_bindings"}
+                    or any(coordination["schema"][key] != value for key, value in bound_schema.items())
+                    or coordination["schema"]["current_bindings"] not in (None, input_binding["bindings"])):
+                raise ValueError("AI 조율의 입력 스키마와 검증된 바인딩이 다릅니다.")
     manifest = {
         "data_id": eda["data_id"], "prepared_source": source,
-        "feature_columns": source["features"], "files": {"metadata.csv": None},
+        "feature_columns": source["features"],
+        "files": input_binding["source_manifest"]["files"] if input_binding else {"metadata.csv": None},
         "split_rows": {name: source["splits"][name]["rows"]
                        for name in ("train", "validation", "test")}}
     plans = planning.build_plans(eda, manifest, selection, ai, catalogs=catalogs, policy=policy)
@@ -484,6 +602,8 @@ def _snapshot(repository, pull, issue, files):
         "merger": pull["merged_by"]["login"], "merged_at": merged_at,
         "file_hashes": {name: _hash(content) for name, content in sorted(files.items())},
         "data_id": eda["data_id"], "data_image": reference, "model_image": model_reference,
+        "input_contract": input_binding,
+        "coordination": coordination,
         "model": copy.deepcopy(source.get("model", {})),
         "selection": selection, "primary_metric": primary,
         "threshold": evaluation.get("threshold"), "parameters": evaluation.get("parameters"),
@@ -497,10 +617,12 @@ def _snapshot(repository, pull, issue, files):
         "limitations": {"data": source.get("limitations", []),
                         "model": source.get("model", {}).get("limitations", []),
                         "patient_overlap": {
-                            "overlaps": copy.deepcopy(source["expected_patient_overlap"]),
+                            "overlaps": copy.deepcopy(next(
+                                item["details"]["overlaps"] for item in results
+                                if item["block"] == "patient_overlap")),
                             "status": next(item["status"] for item in results
                                            if item["block"] == "patient_overlap")},
-                        "validation_development_reuse": True,
+                        "validation_development_reuse": True if "source_profile" not in source else None,
                         "independent_clinical_validation": False,
                         "uncertain_blocks": [item["block"] for item in results
                                              if item["status"] == "unverifiable"],
@@ -524,6 +646,20 @@ def freeze_merge(event, repository, default):
     directory = f"research/reports/issue-{issue}/"
     files = {name: _file(repository, tree, directory + name) for name in REPORT_FILES}
     files.update({name: _file(repository, tree, name) for name in CONFIG_FILES})
+    binding = _file(repository, tree, directory + "input-mapping.json", optional=True)
+    if binding is not None:
+        files["input-mapping.json"] = binding
+        files["config/input-profiles.json"] = _file(repository, tree, "config/input-profiles.json")
+        schema = _file(repository, tree, directory + "input-schema.json", optional=True)
+        if schema is not None:
+            files["input-schema.json"] = schema
+    coordination = _file(repository, tree, directory + "coordination-plan.json", optional=True)
+    if coordination is not None:
+        files["coordination-plan.json"] = coordination
+    for name in ("feedback-requests.json", "feedback-applied.json"):
+        value = _file(repository, tree, directory + name, optional=True)
+        if value is not None:
+            files[name] = value
     snapshot = _snapshot(repository, pull, issue, files)
     path = f"research/approved/issue-{issue}/{commit}.json"
     content = _json(snapshot).encode("utf-8")
@@ -571,6 +707,8 @@ def main():
         event = _object(Path(os.environ["GITHUB_EVENT_PATH"]).read_bytes())
         outcome = run_event(event, os.environ["GITHUB_EVENT_NAME"],
                             os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_ACTOR"])
+        from app.recommendation_events import write_target
+        write_target(outcome, os.environ["GITHUB_REPOSITORY"])
         _summary(outcome)
     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as error:
         _summary({"status": "failed", "approval_record_created": False,
