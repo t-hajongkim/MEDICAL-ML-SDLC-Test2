@@ -11,7 +11,7 @@ AI가 점검 실행을 요청하면 Python이 등록된 입력·타입·매개�
 data_id: `c34ec224503e2038c79fd11c47e0f603c7e392ba46f4e8c14e1661bfaf5303fd`
 스키마 context_hash: `1da8ddee19360eb49545815e2a9a8cd62f3110592fcacf8500940b260ca38aa7`
 데이터 이미지: `ghcr.io/t-hajongkim/medical-ml-sdlc-db@sha256:a81f2187eaac6b465b3443df423ee369ab7e7cd216e71ab9c0a4aeb8a88ab947`
-실행 코드: `46cd10ed1ce0dfa07e2b54e55f8b66e5eb6421f2`
+실행 코드: `18ec032e0852fae474991b67e7f8c25dded1186c`
 
 공개 연구 목적·질문은 AI에 제공하지만 환자 원본 행·식별자 값·인증정보는 제공하지 않습니다.
 기본 역할 검사를 통과한 Copilot이 입력 매핑을 추천합니다. 새 Python/SQL 코드는 생성·실행하지 않습니다.
