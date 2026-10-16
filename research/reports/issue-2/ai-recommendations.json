@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "provider": "github-copilot-cloud-agent",
+  "context_hash": "d307607cd0971bb960f7ee08520ef0070851b07614fde4528c361cdb266dbeeb",
+  "status": "provided",
+  "eda": [
+    {
+      "id": "schema",
+      "reason": "113개 특성 순서·유한 수치·행 정렬 계약을 확인하는 필수 점검입니다. 수치 계약은 통과했지만 임상 의미·단위는 확인 불가이며 일부 상수 열은 자동 제거 근거가 아닙니다.",
+      "evidence": [
+        "required.schema.status",
+        "required.schema.numeric_contract",
+        "required.schema.schema_match",
+        "required.schema.actual_count",
+        "required.schema.rows"
+      ]
+    },
+    {
+      "id": "patient_overlap",
+      "reason": "분할 간 환자 중복이 실제로 측정되어 failed입니다(train-validation 5,055, train-test 5,086, validation-test 1,760). 독립 환자 단위 holdout이 아니라는 교육용 한계를 유지하며 분할은 변경하지 않습니다.",
+      "evidence": [
+        "required.patient_overlap.status",
+        "required.patient_overlap.overlaps",
+        "split_counts"
+      ]
+    },
+    {
+      "id": "demographics",
+      "reason": "연령·성별·인종별 표본 수와 재입원 분포를 기술하고 원본 인종 결측(race_original)과 Caucasian 대치값을 구분합니다. 기술 통계일 뿐 유의성이나 공정성 판단은 아니며 소규모 군은 불안정합니다.",
+      "evidence": [
+        "coordinated.demographics",
+        "target",
+        "split_counts"
+      ]
+    },
+    {
+      "id": "cohort",
+      "reason": "입원 단위 건수, 환자 수, 클래스 불균형(약 11%)을 요약합니다. 연구 단위와 원자료 선정 조건은 확인 불가이며 반복 입원이 유지됩니다.",
+      "evidence": [
+        "coordinated.cohort",
+        "split_counts",
+        "target"
+      ]
+    },
+    {
+      "id": "label_observability",
+      "reason": "<30일을 1, 그 외를 0으로 인코딩한 정답의 관측 한계를 점검합니다. 원본 라벨 대조, 추적 완전성, 외부 병원 재입원 포착은 확인 불가이므로 0이 사건 없음을 입증하지 않습니다.",
+      "evidence": [
+        "coordinated.label_observability",
+        "target"
+      ]
+    },
+    {
+      "id": "preprocessing_lineage",
+      "reason": "대치·표준화·타깃 인코딩의 적합 범위가 확인 불가이고 검증 분할이 모델 개발에 사용되어 누수 없는 독립 holdout 주장이 불가능함을 명시하기 위해 필요합니다.",
+      "evidence": [
+        "coordinated.preprocessing_lineage"
+      ]
+    },
+    {
+      "id": "prediction_timing",
+      "reason": "예측 시점 선언과 특성 가용성 사전이 없어 퇴원·재원 정보 특성의 시점 적합성을 확인할 수 없음을 보고합니다. 이름 기반 선별이며 누수 증명은 아닙니다.",
+      "evidence": [
+        "coordinated.prediction_timing"
+      ]
+    }
+  ],
+  "evaluation": [
+    {
+      "id": "roc_auc",
+      "reason": "임계값 없이 순위 구분력을 보는 초안 지표입니다. 환자 중복과 개발 중 검증 재사용으로 낙관적일 수 있으며 독립 검증 성능이 아닙니다. 주지표는 사람이 확정합니다.",
+      "evidence": [
+        "labels_planned",
+        "probability_output_planned",
+        "required.patient_overlap.overlaps",
+        "target"
+      ]
+    },
+    {
+      "id": "average_precision",
+      "reason": "양성 비율이 약 11%로 불균형하여 양성 탐지 정밀도-재현율 관점을 보완합니다. 기저 사건률에 의존하며 분할 간 환자 중복의 영향을 받습니다.",
+      "evidence": [
+        "target",
+        "split_counts",
+        "labels_planned",
+        "probability_output_planned"
+      ]
+    },
+    {
+      "id": "brier_score",
+      "reason": "확률 출력의 정확성을 평가합니다. 분리 전 정답 인코딩 및 전처리 불확실성 때문에 보정 해석에 주의가 필요하며 현재 계산된 결과가 아닌 계획입니다.",
+      "evidence": [
+        "probability_output_planned",
+        "labels_planned",
+        "coordinated.preprocessing_lineage"
+      ]
+    },
+    {
+      "id": "calibration_curve",
+      "reason": "예측 확률과 관측 사건률을 구간별로 비교합니다. n_bins는 정의되지 않아 기본값을 사용하며 희소 구간은 불안정합니다. 임계값 기반 지표와 임상 행동은 미정이라 추천하지 않습니다.",
+      "evidence": [
+        "probability_output_planned",
+        "parameters.n_bins_defined",
+        "parameters.threshold_defined",
+        "clinical_action_defined"
+      ]
+    }
+  ]
+}

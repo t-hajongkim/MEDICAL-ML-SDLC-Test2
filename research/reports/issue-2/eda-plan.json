@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "stage": "eda",
+  "selected_ids": [
+    "schema",
+    "patient_overlap",
+    "demographics",
+    "cohort",
+    "label_observability",
+    "preprocessing_lineage",
+    "prediction_timing"
+  ],
+  "items": [
+    {
+      "id": "schema",
+      "sources": [
+        "default",
+        "ai"
+      ],
+      "state": "selected_for_diagnosis",
+      "reason": "기본 정책에 포함된 블록입니다. 113개 특성 순서·유한 수치·행 정렬 계약을 확인하는 필수 점검입니다. 수치 계약은 통과했지만 임상 의미·단위는 확인 불가이며 일부 상수 열은 자동 제거 근거가 아닙니다. 자료 부족도 확인 불가로 보고하는 진단입니다.",
+      "blocked_reasons": [],
+      "requires": [
+        "metadata",
+        "feature_columns",
+        "expected_feature_columns",
+        "feature_rows"
+      ],
+      "requires_parameters": [],
+      "requires_context": [],
+      "required": true,
+      "evidence": [
+        "required.schema.status",
+        "required.schema.numeric_contract",
+        "required.schema.schema_match",
+        "required.schema.actual_count",
+        "required.schema.rows"
+      ]
+    },
+    {
+      "id": "patient_overlap",
+      "sources": [
+        "default",
+        "ai"
+      ],
+      "state": "selected_for_diagnosis",
+      "reason": "기본 정책에 포함된 블록입니다. 분할 간 환자 중복이 실제로 측정되어 failed입니다(train-validation 5,055, train-test 5,086, validation-test 1,760). 독립 환자 단위 holdout이 아니라는 교육용 한계를 유지하며 분할은 변경하지 않습니다. 자료 부족도 확인 불가로 보고하는 진단입니다.",
+      "blocked_reasons": [],
+      "requires": [
+        "metadata"
+      ],
+      "requires_parameters": [],
+      "requires_context": [],
+      "required": true,
+      "evidence": [
+        "required.patient_overlap.status",
+        "required.patient_overlap.overlaps",
+        "split_counts"
+      ]
+    },
+    {
+      "id": "demographics",
+      "sources": [
+        "default",
+        "ai"
+      ],
+      "state": "selected_for_diagnosis",
+      "reason": "기본 정책에 포함된 블록입니다. 연령·성별·인종별 표본 수와 재입원 분포를 기술하고 원본 인종 결측(race_original)과 Caucasian 대치값을 구분합니다. 기술 통계일 뿐 유의성이나 공정성 판단은 아니며 소규모 군은 불안정합니다. 자료 부족도 확인 불가로 보고하는 진단입니다.",
+      "blocked_reasons": [],
+      "requires": [
+        "metadata"
+      ],
+      "requires_parameters": [],
+      "requires_context": [],
+      "required": false,
+      "evidence": [
+        "coordinated.demographics",
+        "target",
+        "split_counts"
+      ]
+    },
+    {
+      "id": "cohort",
+      "sources": [
+        "default",
+        "ai"
+      ],
+      "state": "selected_for_diagnosis",
+      "reason": "기본 정책에 포함된 블록입니다. 입원 단위 건수, 환자 수, 클래스 불균형(약 11%)을 요약합니다. 연구 단위와 원자료 선정 조건은 확인 불가이며 반복 입원이 유지됩니다. 자료 부족도 확인 불가로 보고하는 진단입니다.",
+      "blocked_reasons": [],
+      "requires": [
+        "metadata"
+      ],
+      "requires_parameters": [],
+      "requires_context": [],
+      "required": false,
+      "evidence": [
+        "coordinated.cohort",
+        "split_counts",
+        "target"
+      ]
+    },
+    {
+      "id": "label_observability",
+      "sources": [
+        "ai"
+      ],
+      "state": "selected_for_diagnosis",
+      "reason": "<30일을 1, 그 외를 0으로 인코딩한 정답의 관측 한계를 점검합니다. 원본 라벨 대조, 추적 완전성, 외부 병원 재입원 포착은 확인 불가이므로 0이 사건 없음을 입증하지 않습니다. 자료 부족도 확인 불가로 보고하는 진단입니다.",
+      "blocked_reasons": [],
+      "requires": [
+        "metadata",
+        "target_mapping"
+      ],
+      "requires_parameters": [],
+      "requires_context": [],
+      "required": false,
+      "evidence": [
+        "coordinated.label_observability",
+        "target"
+      ]
+    },
+    {
+      "id": "preprocessing_lineage",
+      "sources": [
+        "ai"
+      ],
+      "state": "selected_for_diagnosis",
+      "reason": "대치·표준화·타깃 인코딩의 적합 범위가 확인 불가이고 검증 분할이 모델 개발에 사용되어 누수 없는 독립 holdout 주장이 불가능함을 명시하기 위해 필요합니다. 자료 부족도 확인 불가로 보고하는 진단입니다.",
+      "blocked_reasons": [],
+      "requires": [
+        "data_manifest"
+      ],
+      "requires_parameters": [],
+      "requires_context": [],
+      "required": false,
+      "evidence": [
+        "coordinated.preprocessing_lineage"
+      ]
+    },
+    {
+      "id": "prediction_timing",
+      "sources": [
+        "ai"
+      ],
+      "state": "selected_for_diagnosis",
+      "reason": "예측 시점 선언과 특성 가용성 사전이 없어 퇴원·재원 정보 특성의 시점 적합성을 확인할 수 없음을 보고합니다. 이름 기반 선별이며 누수 증명은 아닙니다. 자료 부족도 확인 불가로 보고하는 진단입니다.",
+      "blocked_reasons": [],
+      "requires": [
+        "feature_columns"
+      ],
+      "requires_parameters": [],
+      "requires_context": [],
+      "required": false,
+      "evidence": [
+        "coordinated.prediction_timing"
+      ]
+    }
+  ],
+  "defaults": [
+    "schema",
+    "patient_overlap",
+    "demographics",
+    "cohort"
+  ],
+  "required_ids": [
+    "schema",
+    "patient_overlap"
+  ],
+  "ai_recommended_ids": [
+    "schema",
+    "patient_overlap",
+    "demographics",
+    "cohort",
+    "label_observability",
+    "preprocessing_lineage",
+    "prediction_timing"
+  ],
+  "user_added_ids": [],
+  "user_excluded_ids": [],
+  "objectives": [
+    "data_quality",
+    "population_description",
+    "prediction_readiness",
+    "cohort_definition",
+    "outcome_observability",
+    "preprocessing_provenance"
+  ],
+  "ai_status": "provided",
+  "approval_required": true,
+  "planning_complete": true,
+  "draft": false,
+  "clinical_use_approved": false
+}
